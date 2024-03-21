@@ -1022,16 +1022,13 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
                         Console.WriteLine($"Counter: {chartCounter}");
                         if (chartCounter == 0)
                         {
-                           if (this.chart.ChartAreas[0] != null) this.chart.ChartAreas[0].BackColor = Color.LightGray;
+                            if (this.chart.ChartAreas[0] != null) this.chart.ChartAreas[0].BackColor = Color.LightGray;
                             for (int j = 0; j < channelCount; j++)
                             {
                                 for (int i = 0; i < dataCount; i++)
                                 {
-                                    //Console.WriteLine($"1");
                                     double interpSample = myData[j, interpRate * i];
-                                    //Console.WriteLine($"2");
-                                    if(this.chart.Series[j].Points != null) this.chart.Series[j].Points.AddXY(xValue.ToString("F2"), interpSample);
-                                    //Console.WriteLine($"3");
+                                    if (this.chart.Series[j].Points != null) this.chart.Series[j].Points.AddXY(xValue.ToString("F2"), interpSample);
                                     if (interpSample > maxCandidate) maxCandidate = interpSample;
                                     if (interpSample < minCandidate) minCandidate = interpSample;
                                 }
@@ -1057,7 +1054,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
 
                             for (int j = 0; j < channelCount; j++)
                             {
-                                if(this.chart.Series[j].Points != null)
+                                if (this.chart.Series[j].Points != null)
                                 {
                                     maxOnScreen[j] = this.chart.Series[j].Points.FindMaxByValue().YValues[0];
                                     minOnScreen[j] = this.chart.Series[j].Points.FindMinByValue().YValues[0];
@@ -1072,34 +1069,44 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
                         }
 
                         //Add a tolerance to  maximum and minimum values
-                        double dSginal = maxRounded - minRounded;
-                        maxRounded = maxRounded + 0.1 * maxRounded;
-                        minRounded = minRounded - 0.1 * maxRounded;
+                        if (maxRounded != minRounded)
+                        {
+                            double dSginal = maxRounded - minRounded;
+                            maxRounded = maxRounded + 0.1 * dSginal;
+                            minRounded = minRounded - 0.1 * dSginal;
+                        }
+                        else
+                        {
+                            maxRounded = maxRounded + Math.Abs(maxRounded) * 0.1;
+                            minRounded = minRounded - Math.Abs(minRounded) * 0.1;
+                        }
 
                         // Change the chat's y-axis
                         if (maxRounded != lastMax)
                         {
                             lastMax = maxRounded;
                             if (this.chart.ChartAreas[0].AxisY != null) this.chart.ChartAreas[0].AxisY.Maximum = maxRounded;
-                        }                         
+                        }
                         if (minRounded != lastMin)
                         {
                             lastMin = minRounded;
-                            if (this.chart.ChartAreas[0].AxisY != null) this.chart.ChartAreas[0].AxisY.Minimum = minRounded;                            
+                            if (this.chart.ChartAreas[0].AxisY != null) this.chart.ChartAreas[0].AxisY.Minimum = minRounded;
                         }
 
                         chartCounter++;
                         //this.chart.ChartAreas[0].AxisY.Interval = (maxRounded - minRounded) / 5;
-
+                        //var s = string.Format("{0:0.00}", maxRounded);
+                        // Console.WriteLine(s);
+                        //s = string.Format("{0:0.00}", minRounded);
+                        //Console.WriteLine(s);
                     }
                     lastData = myData;
                     xAxisCounter++;
                 }
                 catch (Exception ex)
                 {
-                    //MessageBox.Show(ex.TargetSite.ToString());
+                    MessageBox.Show(ex.TargetSite.ToString());
                     string elapsedTime = stopwatch.Elapsed.TotalMilliseconds.ToString("F4");
-                    //CloseFile();
                     runningAITask = null;
                     runningDOTask = null;
                     AITask.Dispose();
