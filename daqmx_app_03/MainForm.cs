@@ -82,20 +82,19 @@
 *
 ******************************************************************************/
 
+using NationalInstruments.DAQmx;
 using System;
-using System.Drawing;
-using System.Collections;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Windows.Forms;
+using System.Collections.Concurrent;
 using System.Data;
+using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.Linq;
-using System.Diagnostics;
-using System.Windows.Forms.DataVisualization.Charting;
 using System.Threading;
+using System.Windows.Forms;
+using System.Windows.Forms.DataVisualization.Charting;
 
-using NationalInstruments.DAQmx;
 
 namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
 {
@@ -106,9 +105,9 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
     {
         private Task AITask;
         private Task runningAITask;
-        private AnalogMultiChannelReader analogInReader;        
+        private AnalogMultiChannelReader analogInReader;
         private AsyncCallback analogCallback;
-        
+
         private Task DOTask;
         private Task runningDOTask;
         private DigitalSingleChannelWriter digitalOutWriter;
@@ -116,7 +115,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
 
         private double[,] data;
         private DataColumn[] dataColumn = null;
-        private ArrayList savedData;
+        private List<double> savedData;
         //private StreamWriter fileStreamWriter;
         private BinaryWriter fileBinaryWriter;
         private int tableMaximumRows = 17;
@@ -137,7 +136,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
         private System.Windows.Forms.Label maximumLabel;
         private System.Windows.Forms.Label minimumLabel;
         private System.Windows.Forms.Label physicalChannelLabel;
-        private System.Windows.Forms.Label rateLabel;       
+        private System.Windows.Forms.Label rateLabel;
         private System.Windows.Forms.Label samplesLabel;
         private System.Windows.Forms.Label channNumObsLabel;
 
@@ -166,7 +165,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
         private Label ChnnNumObsLabel;
         private String[] physicalChannelNames;
         private String[] physicalDigitalChannelNames;
-        private String[] channelNames;
+        private String[] AIChannelNames;
         private Stopwatch stopwatch;
         private GroupBox digitalOutputGroupBox;
         private Label DOChannel1Label;
@@ -180,6 +179,16 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
         private System.Windows.Forms.DataVisualization.Charting.Chart chart;
         private TimeSpan stopwatchCounter;
         //private System.Windows.Forms.Timer statusCheckTimer;
+
+        // Test thread
+        private ConcurrentQueue<List<double>> dataQueue;
+        private ConcurrentQueue<List<double>> dataQueueCopy = new ConcurrentQueue<List<double>>();
+        private bool isWriting;
+        private readonly object lockObj = new object();
+        private readonly object queueLock = new object();
+        private readonly object dataLock = new object();
+        private readonly object fileWriteLock = new object();
+        private AutoResetEvent newDataEvent = new AutoResetEvent(false);
 
         public MainForm()
         {
@@ -198,8 +207,8 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
             String[] chnnNumber = new String[physicalChannelNames.Length];
             for (int i = 0; i < physicalChannelNames.Length; i++)
             {
-                chnnNumber[i] = (i+1).ToString();
-            }     
+                chnnNumber[i] = (i + 1).ToString();
+            }
             physicalChannelComboBox.Items.AddRange(chnnNumber);
             if (physicalChannelComboBox.Items.Count > 0)
                 physicalChannelComboBox.SelectedIndex = 0;
@@ -210,7 +219,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
             {
                 chnnNumber[i] = physicalDigitalChannelNames[i];
             }
-            
+
             DOChannel1ComboBox.Items.AddRange(chnnNumber);
             if (DOChannel1ComboBox.Items.Count > 0)
                 DOChannel1ComboBox.SelectedIndex = 0;
@@ -225,11 +234,11 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
         /// <summary>
         /// Clean up any resources being used.
         /// </summary>
-        protected override void Dispose( bool disposing )
+        protected override void Dispose(bool disposing)
         {
-            if( disposing )
+            if (disposing)
             {
-                if (components != null) 
+                if (components != null)
                 {
                     components.Dispose();
                 }
@@ -239,7 +248,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
                     AITask.Dispose();
                 }
             }
-            base.Dispose( disposing );
+            base.Dispose(disposing);
         }
 
         #region Windows Form Designer generated code
@@ -468,6 +477,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
             0,
             0,
             0});
+            this.samplesPerChannelNumeric.ValueChanged += new System.EventHandler(this.samplesPerChannelNumeric_ValueChanged);
             // 
             // channNumObsLabel
             // 
@@ -775,7 +785,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
         /// The main entry point for the application.
         /// </summary>
         [STAThread]
-        static void Main() 
+        static void Main()
         {
             Application.EnableVisualStyles();
             Application.DoEvents();
@@ -784,7 +794,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
 
         private void browseWriteButton_Click(object sender, System.EventArgs e)
         {
-            if (textFileWriteRadioButton.Checked) 
+            if (textFileWriteRadioButton.Checked)
             {
                 useTextFileWrite = true;
                 writeToFileSaveFileDialog.DefaultExt = "*.txt";
@@ -815,8 +825,8 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
         {
             if (runningAITask == null)
             {
-                try 
-                {   
+                try
+                {
                     // Create a new file for data
                     //bool opened = CreateDataFile();
 
@@ -853,24 +863,24 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
                     //Configure the timing parameters
                     AITask.Timing.ConfigureSampleClock("", Convert.ToDouble(rateNumeric.Value),
                         SampleClockActiveEdge.Rising, SampleQuantityMode.ContinuousSamples, Convert.ToInt32(samplesPerChannelNumeric.Value));
-                    
+
                     //Verify the Task
                     AITask.Control(TaskAction.Verify);
                     DOTask.Control(TaskAction.Verify);
 
                     //Prepare the table and file for Data
-                    channelNames = new String[AITask.AIChannels.Count];
+                    AIChannelNames = new String[AITask.AIChannels.Count];
                     i = 0;
                     foreach (AIChannel a in AITask.AIChannels)
                     {
-                        channelNames[i] = a.PhysicalName;
+                        AIChannelNames[i] = a.PhysicalName;
                         i++;
                     }
 
                     // Add the channel names (and any other information) to the file
                     int samples = Convert.ToInt32(samplesPerChannelNumeric.Value);
                     //PrepareFileForData();
-                    savedData = new ArrayList();
+                    savedData = new List<double>();
                     //for (i = 0; i < AITask.AIChannels.Count; i++)
                     //{
                     //    savedData.Add(new ArrayList());
@@ -879,13 +889,13 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
                     // Initialize Chart
                     for (i = this.chart.Series.Count; i < AITask.AIChannels.Count; i++)
                     {
-                            Series newSerie = new Series();
-                            newSerie.ChartArea = "ChartArea";
-                            newSerie.Legend = "Legend";
-                            newSerie.Name = $"Series,{i}";
-                            this.chart.Series.Add(newSerie);
-                            this.chart.Series[i].ChartType = SeriesChartType.Spline;
-                            this.chart.Series[i].BorderWidth = 2;
+                        Series newSerie = new Series();
+                        newSerie.ChartArea = "ChartArea";
+                        newSerie.Legend = "Legend";
+                        newSerie.Name = $"Series,{i}";
+                        this.chart.Series.Add(newSerie);
+                        this.chart.Series[i].ChartType = SeriesChartType.Spline;
+                        this.chart.Series[i].BorderWidth = 2;
                     }
 
                     // Instantiate the running Tasks
@@ -896,7 +906,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
                     analogInReader = new AnalogMultiChannelReader(AITask.Stream);
                     // Use SynchronizeCallbacks to specify that the object 
                     // marshals callbacks across threads appropriately.
-                    analogInReader.SynchronizeCallbacks = true;                    
+                    analogInReader.SynchronizeCallbacks = true;
                     analogCallback = new AsyncCallback(AnalogInCallback);
                     analogInReader.BeginReadMultiSample(samples, analogCallback, AITask);
 
@@ -922,6 +932,9 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
                         statusCheckTimer.Enabled = true;
                         statusCheckTimer.Start();
                     }
+
+                    DataWriter();
+                    StartWritingThread();
                 }
                 catch (DaqException exception)
                 {
@@ -940,7 +953,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
                         statusCheckTimer.Dispose();
                     }
                     writeToFileGroupBox.Enabled = true;
-                }           
+                }
             }
         }
 
@@ -952,7 +965,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
             this.chart.ChartAreas[0].Position.Width = 100;
             this.chart.ChartAreas[0].Position.Height = 100;
             this.chart.Legends[0].Enabled = false;
-            this.chart.BackColor = Color.Transparent; 
+            this.chart.BackColor = Color.Transparent;
             this.chart.ChartAreas[0].AxisY.IsStartedFromZero = false;
             this.chart.ChartAreas[0].AxisY.LabelStyle.Format = "0.000";
             this.chart.ChartAreas[0].AxisX.LabelStyle.Format = "0.00";
@@ -1130,7 +1143,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
         {
             try
             {
-                if(runningAITask != null && runningAITask == ar.AsyncState)
+                if (runningAITask != null && runningAITask == ar.AsyncState)
                 {
                     //Read the available data from the channels
                     data = analogInReader.EndReadMultiSample(ar);
@@ -1145,8 +1158,8 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
                         analogCallback, AITask);
                 }
             }
-            catch(DaqException exception)
-            {   
+            catch (DaqException exception)
+            {
                 //Display Errors
                 MessageBox.Show(exception.Message);
                 runningAITask = null;
@@ -1200,14 +1213,14 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
             if (runningAITask != null)
             {
                 //Close file
-                Queue2FileCaller caller = new Queue2FileCaller(Queue2File);
-                IAsyncResult result = caller.BeginInvoke(null, null);
-                
+                //Queue2FileCaller caller = new Queue2FileCaller(Queue2File);
+                //IAsyncResult result = caller.BeginInvoke(null, null);
+
                 stopwatch.Stop();
                 //string elapsedTime = String.Format("{0:00}:{1:00}:{2:00}.{3:00}",
                 //ts.Hours, ts.Minutes, ts.Seconds, ts.Milliseconds/10);
                 //string elapsedTime = stopWatchCounter.TotalMilliseconds.ToString("F4");
-                string elapsedTime = stopwatch.Elapsed.TotalMilliseconds.ToString("F4");                
+                string elapsedTime = stopwatch.Elapsed.TotalMilliseconds.ToString("F4");
                 //CloseFile();
 
                 chartTimer.Stop();
@@ -1216,7 +1229,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
                 for (int i = 0; i < Convert.ToInt32(physicalChannelComboBox.Text); i++)
                 {
                     if (i == 0) chart.Series[i].Points.Clear();
-                    else chart.Series.RemoveAt(Convert.ToInt32(physicalChannelComboBox.Text)-i);
+                    else chart.Series.RemoveAt(Convert.ToInt32(physicalChannelComboBox.Text) - i);
 
                 }
                 chartCounter = 0;
@@ -1242,29 +1255,29 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
         }
 
         private void DisplayData(double[,] sourceArray, ref DataTable dataTable)
-        {   
+        {
             //Display the first points of the Read/Write in the Datagrid
             try
             {
                 int channelCount = sourceArray.GetLength(0);
                 int dataCount;
-                
+
                 if (sourceArray.GetLength(1) < tableMaximumRows)
                     dataCount = sourceArray.GetLength(1);
                 else
                     dataCount = tableMaximumRows;
-                
+
                 // Write to Data Table
-                for (int i = 0; i < dataCount; i++)             
+                for (int i = 0; i < dataCount; i++)
                 {
                     for (int j = 0; j < channelCount; j++)
                     {
                         // Writes data to data table
-                        dataTable.Rows[i][j] = sourceArray.GetValue(j, i); 
+                        dataTable.Rows[i][j] = sourceArray.GetValue(j, i);
                     }
                 }
             }
-            catch(Exception e)
+            catch (Exception e)
             {
                 MessageBox.Show(e.ToString());
                 runningAITask = null;
@@ -1291,31 +1304,34 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
             //Console.WriteLine(dataCount);
             //ArrayList dataList = new ArrayList();
 
-            for (int i = 0; i < channelCount; i++)
+            for (int j = 0; j < dataCount; j++)
             {
-                //Console.WriteLine(i);
-                ArrayList newEntry = new ArrayList();
-                for (int j = 0; j < dataCount; j++)
+                for (int i = 0; i < channelCount; i++)
                 {
-                    newEntry.Add(data[i, i]);
+                    savedData.Add(data[i, j]);
                 }
-                savedData.Add(newEntry);
             }
+
+            // TEST
+            List<double> savedDataCopy = new List<double>(savedData);
+            AddData(savedDataCopy);
+            Console.WriteLine(savedData.Count);
+            savedData.Clear();
 
             //int pointsNum = savedData.Count * channelCount;
             //Console.WriteLine($"File Points: {pointsNum}");
             //if (pointsNum >= fileMaxPoints)
             //{
-              //Queue2FileCaller caller = new Queue2FileCaller(Queue2File);
-              //IAsyncResult result = caller.BeginInvoke(null,null);
+            //Queue2FileCaller caller = new Queue2FileCaller(Queue2File);
+            //IAsyncResult result = caller.BeginInvoke(null,null);
             //}
         }
 
-        private Queue<ArrayList> DataToQueue()
+        private Queue<double> DataToQueue()
         {
-            Queue<ArrayList> sdata = new Queue<ArrayList>();
-            
-            foreach (ArrayList arr in savedData)
+            Queue<double> sdata = new Queue<double>();
+
+            foreach (double arr in savedData)
             {
                 sdata.Enqueue(arr);
             }
@@ -1325,26 +1341,15 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
         }
 
         private delegate void Queue2FileCaller();
-        private void Queue2File()
-        {
-            Queue<ArrayList> dataQueue = DataToQueue();
-            StreamWriter fileStreamWriter = CreateDataFile(id);
-            id++;
-            fileStreamWriter = PrepareFileForData(fileStreamWriter);
 
-            foreach (ArrayList arr in dataQueue)
+        public bool IsWriting()
+        {
+            lock (lockObj)
             {
-               for (int i = 0; i < arr.Count; i++)
-               {
-                   fileStreamWriter.Write(arr[i].ToString());
-                   fileStreamWriter.Write("\t"); //seperate the data for each channel
-                }
-               fileStreamWriter.WriteLine(); //new line of data (start next scan)
-             }
-            dataQueue.Clear();
-            CloseFile(fileStreamWriter);
-            Console.WriteLine("End Task.");
+                return isWriting;
+            }
         }
+
         private void WriteBuffer(double[,] data, StreamWriter fileStreamWriter)
         {
             int channelCount = data.GetLength(0);
@@ -1367,7 +1372,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
                     }
                 }
             }
-            catch(Exception e)
+            catch (Exception e)
             {
                 MessageBox.Show(e.TargetSite.ToString());
                 runningAITask = null;
@@ -1423,9 +1428,9 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
             }
         }
 
-        public void InitializeDataTable(String[] channelNames, ref DataTable data, int smp)
+        public void InitializeDataTable(String[] AIChannelNames, ref DataTable data, int smp)
         {
-            int numChannels = channelNames.GetLength(0);
+            int numChannels = AIChannelNames.GetLength(0);
             data.Rows.Clear();
             data.Columns.Clear();
             dataColumn = new DataColumn[numChannels];
@@ -1437,18 +1442,18 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
                 numOfRows = tableMaximumRows;
 
             for (int i = 0; i < numChannels; i++)
-            {   
+            {
                 dataColumn[i] = new DataColumn();
                 dataColumn[i].DataType = typeof(double);
-                dataColumn[i].ColumnName = channelNames[i];
+                dataColumn[i].ColumnName = AIChannelNames[i];
             }
 
-            data.Columns.AddRange(dataColumn); 
+            data.Columns.AddRange(dataColumn);
 
-            for (int i = 0; i < numOfRows; i++)             
+            for (int i = 0; i < numOfRows; i++)
             {
                 object[] rowArr = new object[numChannels];
-                data.Rows.Add(rowArr);              
+                data.Rows.Add(rowArr);
             }
         }
 
@@ -1466,12 +1471,12 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
         private StreamWriter PrepareFileForData(StreamWriter fileStreamWriter)
         {
             //Prepare file for data (Write out the channel names
-            int numChannels = channelNames.Length;
+            int numChannels = AIChannelNames.Length;
 
             for (int i = 0; i < numChannels; i++)
-            {   
-                fileStreamWriter.Write(channelNames[i]);
-                fileStreamWriter.Write("\t"); 
+            {
+                fileStreamWriter.Write(AIChannelNames[i]);
+                fileStreamWriter.Write("\t");
             }
             fileStreamWriter.WriteLine();
             return fileStreamWriter;
@@ -1483,7 +1488,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
             {
                 useTextFileWrite = true;
             }
-            
+
             startButton.Enabled = false;
         }
 
@@ -1493,7 +1498,7 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
             {
                 useTextFileWrite = false;
             }
-            
+
             startButton.Enabled = false;
         }
 
@@ -1563,6 +1568,124 @@ namespace NationalInstruments.Examples.ContAcqVoltageSamples_IntClk_ToFile
         }
 
         private void chart_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        //TEST: THREAD
+        public void DataWriter()
+        {
+            dataQueue = new ConcurrentQueue<List<double>>();
+            isWriting = false;
+        }
+
+        public void StartWritingThread()
+        {
+            ThreadPool.QueueUserWorkItem(state =>
+            {
+                lock (fileWriteLock)
+                {
+                    if (isWriting)
+                    {
+                        // Another thread is already writing, so just return
+                        return;
+                    }
+
+                    lock (dataLock)
+                    {
+                        // Set flag to indicate writing is in progress
+                        isWriting = true;
+                    }
+
+                    try
+                    {
+                        WriteDataToFile();
+                    }
+                    finally
+                    {
+                        lock (dataLock)
+                        {
+                            // Reset the flag to indicate writing is complete
+                            isWriting = false;
+                        }
+                    }
+                }
+            });
+        }
+
+            public void AddData(List<double> newData)
+        {
+            lock (lockObj)
+            {
+                dataQueue.Enqueue(newData);
+                dataQueueCopy = new ConcurrentQueue<List<double>>(dataQueue);
+                dataQueue.TryDequeue(out var q_data);
+                newDataEvent.Set(); // Signal that new data is available
+            }
+        }
+
+        private void WriteDataToFile()
+        {
+            while (true)
+            {
+                newDataEvent.WaitOne(); // Wait until new data is available
+
+                List<List<double>> dataToWrite = new List<List<double>>();
+                lock (queueLock)
+                {
+                    if (!dataQueueCopy.TryDequeue(out var data))
+                    {
+                        // If the queue is empty, wait for a short time before retrying
+                        continue;
+                    }
+
+                    // Add dequeued data to the list of data to write
+                    dataToWrite.Add(new List<double>(data));
+
+                    // Attempt to dequeue more data without blocking
+                    while (dataQueueCopy.TryDequeue(out data))
+                    {
+                        dataToWrite.Add(new List<double>(data));
+                    }
+                    Console.WriteLine(dataToWrite.Count);
+                }
+
+                if (dataToWrite.Count > 0)
+                {
+                    try
+                    {
+                        using (StreamWriter writer = File.AppendText(fileNameWrite))
+                        {
+                            foreach (var dataPoints in dataToWrite)
+                            {
+                                for (int i = 0; i < samplesPerChannelNumeric.Value; i++)
+                                {
+                                    for (int j = 0; j < AIChannelNames.Length; j++)
+                                    {
+                                        writer.Write(dataPoints[(int)AIChannelNames.Length*i+j].ToString("e6") + "\t");
+                                    }
+                                    writer.WriteLine();
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine("Error writing to file: " + ex.Message);
+                        Console.WriteLine(ex.StackTrace);
+                    }
+                    finally
+                    {
+                        lock (lockObj)
+                        {
+                            isWriting = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        private void samplesPerChannelNumeric_ValueChanged(object sender, EventArgs e)
         {
 
         }
